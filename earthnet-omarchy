@@ -1,0 +1,759 @@
+#!/usr/bin/env python3
+"""earthnet-omarchy: data sidecar for the Earthnet Omarchy shell plugin.
+
+The Quickshell plugin (QML) owns all drawing. This process owns everything
+that needs the kernel or the network: connection capture, GeoIP, the land
+geometry, the home location and the Omarchy theme palette.
+
+It talks a tiny line-delimited JSON protocol on stdout:
+
+  * one ``{"type":"init", ...}`` object at startup carrying home coordinates,
+    the theme palette, land geometry and render hints;
+  * one ``{"type":"frame", ...}`` object on every poll with the live trace
+    list (destination coords, colour, label, protocol/port/state, age);
+  * one ``{"type":"error", ...}`` line if a backend fails. Errors are
+    non-fatal: the loop keeps retrying.
+
+Commands (lines on stdin) let QML nudge the process cheaply:
+
+  ``mode live|demo``   switch data source (demo = bundled sample traces)
+  ``poll``             request an immediate frame
+  ``demo`` / ``live``  aliases for ``mode``
+  ``refresh``          reload theme + land and re-emit ``init``
+  ``quit``             exit cleanly
+
+The module reuses the already-installed ``earthnet`` package when it can find
+it (``python3 -m earthnet``), and otherwise falls back to the copies under
+``plugin_dir/pylib/earthnet``. That keeps the sidecar usable both from the
+Earthnet checkout and from a standalone plugin install.
+"""
+from __future__ import annotations
+
+import colorsys
+import hashlib
+import json
+import math
+import os
+import sys
+import threading
+import time
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Make the earthnet package importable, whether we live in the source tree or
+# were copied into ~/.config/omarchy/plugins/<id>/.
+# ---------------------------------------------------------------------------
+
+_HERE = Path(__file__).resolve().parent
+
+
+def _bootstrap_earthnet():
+    candidates = [
+        str(_HERE.parent),          # repo layout: parent holds the earthnet pkg
+        str(_HERE / "pylib"),       # installed plugin layout: vendored copy
+        str(_HERE),                 # earthnet/ copied directly into the plugin
+    ]
+    for c in candidates:
+        if c not in sys.path:
+            sys.path.insert(0, c)
+    try:
+        import earthnet  # noqa: F401
+    except Exception as exc:  # pragma: no cover - depends on install layout
+        sys.stderr.write(f"[earthnet-omarchy] cannot import earthnet: {exc}\n")
+        sys.stderr.flush()
+        raise
+
+
+_bootstrap_earthnet()
+
+from earthnet import conntrack  # noqa: E402
+from earthnet.geo import GeoResolver, remote_endpoint  # noqa: E402
+from earthnet.land import load_landmask  # noqa: E402
+from earthnet.theme import load_palette  # noqa: E402
+
+# Keep the polling cadence in step with the terminal app.
+POLL_INTERVAL = 1.5
+TRACE_HOLD = 3.0
+TRACE_FADE = 2.5
+MAX_TRACES = 64
+
+# Land geometry is static; precompute the unit-sphere coordinates the renderer
+# needs once and ship them in ``init``.
+LAND_CACHE = _HERE / "assets" / "land.geo.json"
+LAND_CACHE_VERSION = 3  # bump to force regeneration when the source changes
+# Coarse 110m set for the tiny bar globe: the same shape at ~1/4 the points, so
+# the two bar globes don't burn CPU projecting detail no one can see at 26px.
+LAND_COARSE_CACHE = _HERE / "assets" / "land_coarse.geo.json"
+
+# Natural Earth 50m coastlines: ~60k points, roughly 12x the detail of the
+# 110m set the terminal app rasterizes, while staying light enough to project
+# every frame. The raw download is cached under the user cache dir; the
+# prepared, simplified geometry lives in assets/land.geo.json.
+NE50M_URL = (
+    "https://raw.githubusercontent.com/martynafford/natural-earth-geojson/"
+    "master/50m/physical/ne_50m_land.json"
+)
+_CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "earthnet"
+NE50M_CACHE = _CACHE_DIR / "ne_50m_land.json"
+
+# Country (administrative-0) boundary lines, for the faint political borders.
+BORDERS_CACHE = _HERE / "assets" / "borders.geo.json"
+BORDERS_VERSION = 1
+NE50M_BORDERS_URL = (
+    "https://raw.githubusercontent.com/martynafford/natural-earth-geojson/"
+    "master/50m/cultural/ne_50m_admin_0_boundary_lines_land.json"
+)
+NE50M_BORDERS_CACHE = _CACHE_DIR / "ne_50m_admin_0_boundary_lines_land.json"
+
+
+# ---------------------------------------------------------------------------
+# Home location
+# ---------------------------------------------------------------------------
+
+def _read_home_override() -> tuple[float, float] | None:
+    """A small file the user can drop next to the plugin to pin home without
+    needing an internet lookup. Contents: ``LAT,LON`` or a JSON object."""
+    for name in ("home.json", "home.txt"):
+        p = _HERE / name
+        if not p.exists():
+            continue
+        try:
+            text = p.read_text().strip()
+        except Exception:
+            continue
+        if not text:
+            continue
+        try:
+            if text.startswith("{"):
+                d = json.loads(text)
+                return (float(d["lat"]), float(d["lon"]))
+        except Exception:
+            pass
+        try:
+            lat, lon = (float(x) for x in text.replace("\n", "").split(","))
+            return (lat, lon)
+        except Exception:
+            continue
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Land geometry
+# ---------------------------------------------------------------------------
+
+def _download(url: str, dest: Path, timeout: float = 60.0) -> bool:
+    import urllib.request
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "earthnet/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = r.read()
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        return True
+    except Exception as e:
+        print(f"[land] download failed: {url}: {e}", flush=True)
+        return False
+
+
+def _fetch_ne50m() -> dict | None:
+    """Load (downloading once) the Natural Earth 50m land geojson."""
+    if NE50M_CACHE.exists() and NE50M_CACHE.stat().st_size > 1000:
+        try:
+            return json.loads(NE50M_CACHE.read_text())
+        except Exception:
+            pass
+    if _download(NE50M_URL, NE50M_CACHE):
+        try:
+            return json.loads(NE50M_CACHE.read_text())
+        except Exception:
+            pass
+    return None
+
+
+def _simplify_ring(points: list[tuple[float, float]], tol: float) -> list[tuple[float, float]]:
+    """Ramer-Douglas-Peucker, iterative, in lon/lat degrees. Drops points that
+    sit within ``tol`` of the line between their neighbours, cutting the 50m
+    set's ~60k points without visibly changing the coastline at panel sizes."""
+    n = len(points)
+    if n < 3:
+        return points
+    keep = [False] * n
+    keep[0] = keep[n - 1] = True
+    stack = [(0, n - 1)]
+    tol2 = tol * tol
+    while stack:
+        lo, hi = stack.pop()
+        if hi <= lo + 1:
+            continue
+        ax, ay = points[lo]
+        bx, by = points[hi]
+        dx, dy = bx - ax, by - ay
+        seg2 = dx * dx + dy * dy
+        best_d2 = -1.0
+        best_i = -1
+        for i in range(lo + 1, hi):
+            px, py = points[i]
+            if seg2 <= 1e-12:
+                ex, ey = px - ax, py - ay
+            else:
+                t = ((px - ax) * dx + (py - ay) * dy) / seg2
+                t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else t
+                ex, ey = px - (ax + t * dx), py - (ay + t * dy)
+            d2 = ex * ex + ey * ey
+            if d2 > best_d2:
+                best_d2 = d2
+                best_i = i
+        if best_d2 > tol2:
+            keep[best_i] = True
+            stack.append((lo, best_i))
+            stack.append((best_i, hi))
+    return [points[i] for i in range(n) if keep[i]]
+
+
+def _land_geometry() -> dict:
+    """Return ``{"lat": [...], "lon": [...], "rings": [n, ...]}`` for the
+    coastlines, computed from the cached Natural Earth geojson."""
+    if LAND_CACHE.exists():
+        try:
+            d = json.loads(LAND_CACHE.read_text())
+            if d.get("v") == LAND_CACHE_VERSION and d.get("lat"):
+                return d
+        except Exception:
+            pass
+
+    from earthnet.land import _rings_from_geojson
+
+    gj = _fetch_ne50m()
+    # Tolerance in degrees: 0.10 keeps ~14k points (about 3x the old 110m
+    # detail) while staying light enough to project + fill every frame.
+    tol = 0.10
+    if gj is None:
+        # Fall back to whatever the terminal app has cached, then its mirrors.
+        from earthnet.land import GEOJSON_CACHE, _fetch_geojson
+        tol = 0.0  # the 110m set is already coarse; don't simplify
+        if GEOJSON_CACHE.exists():
+            try:
+                gj = json.loads(GEOJSON_CACHE.read_text())
+            except Exception:
+                gj = None
+        if gj is None:
+            gj = _fetch_geojson()
+
+    lat: list[float] = []
+    lon: list[float] = []
+    ring_counts: list[int] = []
+    if gj:
+        for ring in _rings_from_geojson(gj):
+            if tol > 0.0 and len(ring) > 3:
+                ring = _simplify_ring(ring, tol)
+            if len(ring) < 3:
+                continue
+            ring_counts.append(len(ring))
+            for x, y in ring:
+                lon.append(round(float(x), 2))
+                lat.append(round(float(y), 2))
+    out = {"v": LAND_CACHE_VERSION, "lat": lat, "lon": lon, "rings": ring_counts}
+    try:
+        LAND_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        LAND_CACHE.write_text(json.dumps(out, separators=(",", ":")))
+        _write_coarse_land(out)
+    except Exception:
+        pass
+    return out
+
+
+def _write_coarse_land(fine: dict) -> None:
+    """Downsample the prepared coastline to a coarse set for the bar globe."""
+    try:
+        if LAND_COARSE_CACHE.exists():
+            d = json.loads(LAND_COARSE_CACHE.read_text())
+            if d.get("v") == LAND_CACHE_VERSION and d.get("lat"):
+                return
+    except Exception:
+        pass
+    lat = fine["lat"]; lon = fine["lon"]; counts = fine["rings"]
+    olat: list[float] = []; olon: list[float] = []; ocounts: list[int] = []
+    off = 0
+    step = 4  # keep roughly every 4th point
+    for n in counts:
+        pts = [(lon[off + i], lat[off + i]) for i in range(n)]
+        off += n
+        simp = pts[::step]
+        if simp[-1] != pts[-1]:
+            simp.append(pts[-1])
+        if len(simp) < 3:
+            continue
+        ocounts.append(len(simp))
+        for x, y in simp:
+            olon.append(x); olat.append(y)
+    out = {"v": LAND_CACHE_VERSION, "lat": olat, "lon": olon, "rings": ocounts}
+    LAND_COARSE_CACHE.write_text(json.dumps(out, separators=(",", ":")))
+
+
+def _coarse_land() -> dict | None:
+    try:
+        d = json.loads(LAND_COARSE_CACHE.read_text())
+        if d.get("v") == LAND_CACHE_VERSION and d.get("lat"):
+            return d
+    except Exception:
+        pass
+    return None
+
+
+def _borders_lines(gj: dict) -> list[list[tuple[float, float]]]:
+    """Extract line strings (lon, lat) from an admin-boundary geojson."""
+    lines: list[list[tuple[float, float]]] = []
+    feats = gj.get("features") if gj.get("type") == "FeatureCollection" else [gj]
+    for f in feats or []:
+        g = f.get("geometry") or {}
+        t = g.get("type")
+        c = g.get("coordinates")
+        parts = []
+        if t == "LineString":
+            parts = [c]
+        elif t == "MultiLineString":
+            parts = c
+        for ln in parts:
+            if ln and len(ln) >= 2:
+                lines.append([(float(p[0]), float(p[1])) for p in ln])
+    return lines
+
+
+def _borders_geometry() -> dict:
+    """Return ``{"lat": [...], "lon": [...], "lines": [n, ...]}`` for the
+    country boundary lines, from the cached/downloaded Natural Earth geojson."""
+    if BORDERS_CACHE.exists():
+        try:
+            d = json.loads(BORDERS_CACHE.read_text())
+            if d.get("v") == BORDERS_VERSION and d.get("lat"):
+                return d
+        except Exception:
+            pass
+
+    gj = None
+    if NE50M_BORDERS_CACHE.exists() and NE50M_BORDERS_CACHE.stat().st_size > 1000:
+        try:
+            gj = json.loads(NE50M_BORDERS_CACHE.read_text())
+        except Exception:
+            gj = None
+    if gj is None and _download(NE50M_BORDERS_URL, NE50M_BORDERS_CACHE):
+        try:
+            gj = json.loads(NE50M_BORDERS_CACHE.read_text())
+        except Exception:
+            gj = None
+
+    lat: list[float] = []
+    lon: list[float] = []
+    line_counts: list[int] = []
+    if gj:
+        for ln in _borders_lines(gj):
+            if len(ln) > 3:
+                ln = _simplify_ring(ln, 0.08)
+            if len(ln) < 2:
+                continue
+            line_counts.append(len(ln))
+            for x, y in ln:
+                lon.append(round(float(x), 2))
+                lat.append(round(float(y), 2))
+    out = {"v": BORDERS_VERSION, "lat": lat, "lon": lon, "lines": line_counts}
+    try:
+        BORDERS_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        BORDERS_CACHE.write_text(json.dumps(out, separators=(",", ":")))
+    except Exception:
+        pass
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Palette
+# ---------------------------------------------------------------------------
+
+def _palette_dict(pal) -> dict:
+    def hx(c):
+        return "#%02x%02x%02x" % (int(c[0]), int(c[1]), int(c[2]))
+    return {
+        "space": hx(pal.space),
+        "ocean": hx(pal.ocean),
+        "land": hx(pal.land),
+        "land_hi": hx(pal.land_hi),
+        "grid": hx(pal.grid),
+        "ring": hx(pal.ring),
+        "star": hx(pal.star),
+        "trace": hx(pal.trace),
+        "trace_hot": hx(pal.trace_hot),
+        "trace_far": hx(pal.trace_far),
+        "hud_dim": hx(pal.hud_dim),
+        "hud_bright": hx(pal.hud_bright),
+        "hud_accent": hx(pal.hud_accent),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Trace colouring (matches the terminal app)
+# ---------------------------------------------------------------------------
+
+def _trace_color(key: str) -> str:
+    h = int(hashlib.md5(key.encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
+    r, g, b = colorsys.hsv_to_rgb(h, 0.65, 1.0)
+    return "#%02x%02x%02x" % (int(r * 255), int(g * 255), int(b * 255))
+
+
+# ---------------------------------------------------------------------------
+# Demo data
+# ---------------------------------------------------------------------------
+
+DEMO_DESTINATIONS = [
+    ("Tokyo", "JP", 35.68, 139.76),
+    ("London", "GB", 51.51, -0.13),
+    ("Sydney", "AU", -33.87, 151.21),
+    ("Sao Paulo", "BR", -23.55, -46.63),
+    ("Singapore", "SG", 1.35, 103.82),
+    ("Mumbai", "IN", 19.08, 72.88),
+    ("Cape Town", "ZA", -33.92, 18.42),
+    ("Moscow", "RU", 55.76, 37.62),
+    ("Dubai", "AE", 25.20, 55.27),
+    ("Buenos Aires", "AR", -34.60, -58.38),
+    ("Seoul", "KR", 37.57, 126.98),
+    ("Reykjavik", "IS", 64.15, -21.94),
+]
+DEMO_SEATTLE = (47.61, -122.33)
+DEMO_PORTS = [443, 443, 53, 443, 22, 8080, 443, 443, 443, 53, 443, 22]
+DEMO_STATES = ["ESTABLISHED", "ESTABLISHED", "TIME_WAIT", "ESTABLISHED",
+               "ESTABLISHED", "CLOSE", "ESTABLISHED", "SYN_SENT",
+               "ESTABLISHED", "TIME_WAIT", "ESTABLISHED", "ESTABLISHED"]
+# (process, direction, ISP/org, ASN, rate bytes/s, rtt ms) per destination, so
+# demo mode shows the full legend the way live mode does.
+DEMO_META = [
+    ("firefox", "out", "Amazon.com, Inc.", "AS16509 Amazon.com, Inc.", 4_100_000, 87.0),
+    ("firefox", "out", "Cloudflare, Inc.", "AS13335 Cloudflare, Inc.", 1_200_000, 132.0),
+    ("systemd-resolved", "out", "Google LLC", "AS15169 Google LLC", 8_000, 160.0),
+    ("curl", "out", "Akamai Technologies", "AS20940 Akamai International B.V.", 320_000, 24.0),
+    ("ssh", "in", "Amazon Data Services", "AS16509 Amazon.com, Inc.", 42_000, 46.0),
+    ("firefox", "out", "DigitalOcean, LLC", "AS14061 DigitalOcean, LLC", 96_000, 41.0),
+    ("firefox", "out", "NTT Communications", "AS2914 NTT America, Inc.", 640_000, 210.0),
+    ("firefox", "out", "Yandex LLC", "AS20055 Yandex LLC", 14_000, 145.0),
+    ("slack", "out", "Oracle Cloud", "AS31898 Oracle Corporation", 58_000, 188.0),
+    ("systemd-resolved", "out", "Telecom Argentina", "AS7303 Telecom Argentina S.A.", 6_000, 172.0),
+    ("discord", "both", "Korea Telecom", "AS4766 Korea Telecom", 980_000, 122.0),
+    ("firefox", "out", "Vodafone Iceland", "AS12969 Vodafone Iceland", 21_000, 64.0),
+]
+
+
+def demo_traces(home: tuple[float, float]) -> list[dict]:
+    ages = [12, 145, 3, 67, 892, 1, 34, 5, 234, 8, 56, 1203]
+    out = []
+    for i, (city, cc, lat, lon) in enumerate(DEMO_DESTINATIONS):
+        proc, direction, isp, asn, rate, rtt = DEMO_META[i]
+        out.append({
+            "id": f"demo{i}",
+            "lat": lat, "lon": lon,
+            "color": _trace_color(city),
+            "label": city, "city": city, "country": cc, "cc": cc,
+            "isp": isp, "org": isp, "as": asn,
+            "proto": "tcp", "port": DEMO_PORTS[i], "state": DEMO_STATES[i],
+            "direction": direction, "process": proc,
+            "pids": str(1000 + i * 137), "nflows": 1 + (i % 4),
+            "tx": 0, "rx": 0, "rate": float(rate), "rtt": float(rtt),
+            "age": ages[i],
+            "phase": (i / len(DEMO_DESTINATIONS)),
+            "alpha": 1.0,
+        })
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Engine
+# ---------------------------------------------------------------------------
+
+class Engine:
+    def __init__(self, home_override, demo: bool = False, mmdb: str | None = None):
+        self.lock = threading.Lock()
+        self.out_lock = threading.Lock()
+        self.running = True
+        self.demo = demo
+        mmdb = str(Path(mmdb).expanduser()) if mmdb else None
+        self.geo = GeoResolver(mmdb if mmdb and Path(mmdb).exists() else None)
+        self.palette = load_palette()
+        self.land = _land_geometry()
+        self.land_coarse = _coarse_land() or self.land
+        self.borders = _borders_geometry()
+
+        home = home_override
+        if home is None:
+            home = self.geo.detect_home()
+        if home is None:
+            home = DEMO_SEATTLE if demo else (0.0, 0.0)
+        self.home = home
+
+        self.traces: dict[str, dict] = {}
+        self.flow_count = 0
+        self.backend = "demo" if demo else "none"
+        self.seen_at: dict[str, float] = {}
+        self.last_tick = time.monotonic()
+        # Throughput: previous cumulative byte total per remote IP and the
+        # monotonic time it was sampled, so a poll yields a smoothed rate.
+        self.prev_bytes: dict[str, tuple[float, int]] = {}
+
+    # -- output --
+    def emit(self, obj: dict) -> None:
+        line = json.dumps(obj, separators=(",", ":")) + "\n"
+        with self.out_lock:
+            try:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+            except Exception:
+                self.running = False
+
+    def emit_init(self) -> None:
+        self.emit({
+            "type": "init",
+            "home": {"lat": self.home[0], "lon": self.home[1]},
+            "palette": _palette_dict(self.palette),
+            "land": self.land,
+            "landCoarse": self.land_coarse,
+            "borders": self.borders,
+            "landRings": len(self.land.get("rings", [])),
+            "backend": self.backend,
+            "pollInterval": POLL_INTERVAL,
+        })
+
+    # -- data --
+    def _poll_live(self) -> None:
+        flows, backend = conntrack.poll()
+        self.backend = backend
+        self.flow_count = len(flows)
+        # A remote IP can carry several simultaneous flows (and thus several
+        # processes). Aggregate what we can for the legend: newest proto/port/
+        # state, the set of owning processes, and a combined direction.
+        remotes: dict[str, dict] = {}
+        for f in flows:
+            r = remote_endpoint(f.src, f.dst)
+            if r is None:
+                continue
+            port = f.dport if r == f.dst else f.sport
+            agg = remotes.get(r)
+            if agg is None:
+                agg = {"proto": f.proto, "port": port, "state": f.state,
+                       "direction": f.direction, "processes": [], "pids": [],
+                       "tx": 0, "rx": 0, "rtt": 0.0, "nflows": 0}
+                remotes[r] = agg
+            agg["nflows"] += 1
+            # keep the most recently seen tuple as representative
+            agg["proto"] = f.proto
+            agg["port"] = port
+            if f.state:
+                agg["state"] = f.state
+            if f.direction:
+                if not agg["direction"]:
+                    agg["direction"] = f.direction
+                elif agg["direction"] != f.direction:
+                    agg["direction"] = "both"
+            if f.process and f.process not in agg["processes"]:
+                agg["processes"].append(f.process)
+                agg["pids"].append(f.pid)
+            # sum byte counters across every flow to this remote
+            agg["tx"] += f.tx
+            agg["rx"] += f.rx
+            if f.rtt > 0:
+                agg["rtt"] = max(agg["rtt"], f.rtt)
+        if not remotes:
+            return
+        resolved = self.geo.resolve_many(list(remotes.keys()))
+        now = time.monotonic()
+        for ip, agg in remotes.items():
+            g = resolved.get(ip)
+            if not g:
+                continue
+            if g.get("lat") == 0 and g.get("lon") == 0:
+                continue
+            procs = agg["processes"]
+            proc_str = ", ".join(procs[:3]) + (" +%d" % (len(procs) - 3) if len(procs) > 3 else "")
+            pid_str = ", ".join(str(p) for p in agg["pids"][:3])
+            if len(agg["pids"]) > 3:
+                pid_str += " +%d" % (len(agg["pids"]) - 3)
+            # Throughput: rate of change of tx+rx since the previous sample.
+            total = agg["tx"] + agg["rx"]
+            prev = self.prev_bytes.get(ip)
+            if prev is not None and now > prev[0] and total >= prev[1]:
+                rate = (total - prev[1]) / (now - prev[0])
+            else:
+                rate = 0.0
+            self.prev_bytes[ip] = (now, total)
+            existing = self.traces.get(ip)
+            if existing is None:
+                if len(self.traces) >= MAX_TRACES:
+                    worst = min(self.traces, key=lambda k: self.traces[k].get("age", 0))
+                    self.traces.pop(worst, None)
+                self.traces[ip] = {
+                    "id": ip,
+                    "lat": g["lat"], "lon": g["lon"],
+                    "color": _trace_color(ip),
+                    "label": g.get("city") or g.get("country") or "",
+                    "city": g.get("city", ""), "country": g.get("country", ""),
+                    "cc": (g.get("cc") or "").upper(),
+                    "isp": g.get("isp", ""), "org": g.get("org", ""), "as": g.get("as", ""),
+                    "proto": agg["proto"], "port": agg["port"], "state": agg["state"],
+                    "direction": agg["direction"], "process": proc_str, "pids": pid_str,
+                    "nflows": agg["nflows"],
+                    "tx": agg["tx"], "rx": agg["rx"], "rate": rate, "rtt": agg["rtt"],
+                    "age": 0.0,
+                    "phase": (hash(ip) & 0xFFFF) / 65535.0,
+                    "alpha": 1.0,
+                }
+            else:
+                existing.update(lat=g["lat"], lon=g["lon"], proto=agg["proto"],
+                                port=agg["port"], state=agg["state"], alpha=1.0,
+                                direction=agg["direction"], process=proc_str,
+                                pids=pid_str, nflows=agg["nflows"],
+                                tx=agg["tx"], rx=agg["rx"], rate=rate, rtt=agg["rtt"],
+                                isp=g.get("isp", ""), org=g.get("org", ""))
+                existing["as"] = g.get("as", existing.get("as", ""))
+                existing["label"] = g.get("city") or g.get("country") or existing["label"]
+                existing["city"] = g.get("city", existing.get("city", ""))
+                existing["country"] = g.get("country", existing.get("country", ""))
+                existing["cc"] = (g.get("cc") or existing.get("cc", "")).upper()
+            self.seen_at[ip] = now
+
+    def _age_live(self) -> None:
+        now = time.monotonic()
+        for ip in list(self.traces.keys()):
+            t = self.traces[ip]
+            t["age"] = t.get("age", 0.0) + now - self.last_tick
+            last = self.seen_at.get(ip, now)
+            idle = now - last
+            if idle <= TRACE_HOLD:
+                t["alpha"] = 1.0
+            elif idle <= TRACE_HOLD + TRACE_FADE:
+                t["alpha"] = max(0.0, 1.0 - (idle - TRACE_HOLD) / TRACE_FADE)
+            else:
+                self.traces.pop(ip, None)
+                self.seen_at.pop(ip, None)
+                self.prev_bytes.pop(ip, None)
+
+    def emit_frame(self) -> None:
+        if self.demo:
+            traces = demo_traces(self.home)
+            for t in traces:
+                t["age"] = t["age"]
+        else:
+            traces = list(self.traces.values())
+        self.emit({
+            "type": "frame",
+            "traces": traces,
+            "home": {"lat": self.home[0], "lon": self.home[1]},
+            "flows": self.flow_count,
+            "backend": self.backend,
+            "demo": self.demo,
+            "t": time.time(),
+        })
+
+    def tick(self) -> None:
+        if self.demo:
+            self.emit_frame()
+            return
+        with self.lock:
+            self.last_tick = time.monotonic()
+            self._poll_live()
+            self._age_live()
+            self.emit_frame()
+
+    def prime(self) -> None:
+        """Poll once without emitting a frame, so ``init`` can report the real
+        backend and the first frame already carries connections."""
+        if self.demo:
+            self.backend = "demo"
+            return
+        with self.lock:
+            self.last_tick = time.monotonic()
+            try:
+                self._poll_live()
+            except Exception as e:
+                self.emit({"type": "error", "message": str(e)})
+
+    # -- commands --
+    def set_mode(self, demo: bool) -> None:
+        with self.lock:
+            self.demo = demo
+            self.traces.clear()
+            self.seen_at.clear()
+            self.backend = "demo" if demo else "none"
+            self.flow_count = 0 if demo else self.flow_count
+        self.tick()
+
+    def clear_traces(self) -> None:
+        with self.lock:
+            self.traces.clear()
+            self.seen_at.clear()
+        self.tick()
+
+    def refresh(self) -> None:
+        with self.lock:
+            self.palette = load_palette()
+            self.land = _land_geometry()
+            self.land_coarse = _coarse_land() or self.land
+            self.borders = _borders_geometry()
+            self.geo.cache = {}
+        self.emit_init()
+        self.tick()
+
+    def quit(self) -> None:
+        self.running = False
+
+
+def _reader(engine: Engine) -> None:
+    for line in sys.stdin:
+        cmd = line.strip().lower()
+        if not cmd:
+            continue
+        if cmd in ("quit", "q", "exit"):
+            engine.quit()
+            return
+        if cmd in ("demo", "mode demo"):
+            engine.set_mode(True)
+        elif cmd in ("live", "mode live"):
+            engine.set_mode(False)
+        elif cmd == "refresh":
+            engine.refresh()
+        elif cmd == "clear":
+            engine.clear_traces()
+        elif cmd == "poll":
+            engine.tick()
+
+
+def main(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    demo = "--demo" in argv
+    home_override = None
+    mmdb = None
+    for i, a in enumerate(argv):
+        if a == "--home" and i + 1 < len(argv):
+            try:
+                lat, lon = (float(x) for x in argv[i + 1].split(","))
+                home_override = (lat, lon)
+            except Exception:
+                pass
+        elif a == "--mmdb" and i + 1 < len(argv):
+            mmdb = argv[i + 1]
+    if home_override is None:
+        home_override = _read_home_override()
+
+    engine = Engine(home_override, demo=demo, mmdb=mmdb)
+    engine.prime()
+    engine.emit_init()
+    engine.tick()
+
+    reader = threading.Thread(target=_reader, args=(engine,), daemon=True)
+    reader.start()
+
+    while engine.running:
+        time.sleep(POLL_INTERVAL)
+        # demo mode wants a smooth pulse, live mode is fine at the poll rate
+        if engine.demo:
+            engine.emit_frame()
+        else:
+            engine.tick()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

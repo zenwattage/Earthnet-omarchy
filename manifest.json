@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "id": "earthnet.globe",
+  "name": "Earthnet",
+  "version": "0.1.0",
+  "author": "zenwattage",
+  "license": "MIT",
+  "description": "A live, full-resolution 3D Earth in the Omarchy bar: glowing arcs trace every internet connection to and from your machine.",
+  "homepage": "https://github.com/zenwattage/Earthnet",
+  "repository": "https://github.com/zenwattage/Earthnet",
+  "keywords": [
+    "earth",
+    "globe",
+    "network",
+    "conntrack",
+    "geoip",
+    "hud",
+    "jarvis",
+    "map"
+  ],
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Earthnet",
+    "description": "Live 3D globe of your internet connections",
+    "category": "Network",
+    "aliases": ["earthnet", "globe", "earth", "connections"],
+    "allowMultiple": false,
+    "defaultSection": "left",
+    "defaults": {
+      "spinSpeed": 0.35,
+      "demo": false,
+      "mmdb": ""
+    },
+    "schema": [
+      {
+        "key": "spinSpeed",
+        "type": "string",
+        "label": "Spin speed",
+        "defaultValue": "0.35",
+        "description": "Radians per second of automatic rotation. Negative spins the other way."
+      },
+      {
+        "key": "demo",
+        "type": "enum",
+        "label": "Data source",
+        "options": ["Off", "On"],
+        "defaultValue": "Off",
+        "description": "On shows bundled sample connections instead of live traffic."
+      },
+      {
+        "key": "mmdb",
+        "type": "path",
+        "label": "GeoLite2 MMDB (optional)",
+        "defaultValue": "",
+        "description": "Offline GeoIP database. Leave empty to use the free ip-api.com lookup."
+      }
+    ]
+  }
+}
