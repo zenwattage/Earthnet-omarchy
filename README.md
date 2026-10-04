@@ -6,6 +6,8 @@ This is the GUI sibling of the [terminal Earthnet](../README.md): same data,
 same palette, same idea, but drawn in real pixels by Quickshell instead of
 half-blocks and sixel.
 
+![Earthnet panel demo](demo.gif)
+
 The bar shows a small spinning Earth. Left-click it for the full panel: a large
 animated globe, the Jarvis HUD, and a colour-matched legend of every live
 connection. Each legend row shows the destination, protocol/port, how long
