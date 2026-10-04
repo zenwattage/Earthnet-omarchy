@@ -336,6 +336,9 @@ Panel {
                 readonly property bool hovered: rowMouse.containsMouse
                 readonly property bool isSelected:
                   root.selectedId !== "" && String(modelData.id || "") === root.selectedId
+                // Every field of a connection shares its trace colour, so a row
+                // reads as one link rather than only the city being tinted.
+                readonly property color rowColor: modelData.color || root.foreground
                 width: legend.width
                 height: Math.max(legend.rowHeight, rowInner.implicitHeight + Style.space(6))
                 visible: index < legend.maxRows
@@ -390,7 +393,7 @@ Panel {
                       text: root.dirGlyph(modelData.direction) + " " + root.labelOf(modelData)
                       width: line1.labelW
                       elide: Text.ElideRight
-                      color: modelData.color || root.foreground
+                      color: rowItem.rowColor
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.bodySmall
                     }
@@ -399,7 +402,7 @@ Panel {
                         + ":" + (modelData.port || "-")
                       width: line1.protoW
                       elide: Text.ElideRight
-                      color: root.dim
+                      color: rowItem.rowColor
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.bodySmall
                     }
@@ -407,7 +410,7 @@ Panel {
                       text: root.fmtDuration(modelData.age || 0)
                       width: line1.durW
                       horizontalAlignment: Text.AlignRight
-                      color: root.dim
+                      color: rowItem.rowColor
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.bodySmall
                     }
@@ -415,7 +418,7 @@ Panel {
                       text: root.localTime(modelData.lon, 0)
                       width: line1.timeW
                       horizontalAlignment: Text.AlignRight
-                      color: root.dim
+                      color: rowItem.rowColor
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.bodySmall
                     }
@@ -424,7 +427,7 @@ Panel {
                       text: root.fmtRate(modelData.rate || 0)
                       width: line1.rateW
                       horizontalAlignment: Text.AlignRight
-                      color: (modelData.rate || 0) > 0 ? root.accent : root.dim
+                      color: rowItem.rowColor
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.bodySmall
                     }
@@ -432,7 +435,7 @@ Panel {
                       text: root.fmtRtt(modelData.rtt || 0)
                       width: line1.rttW
                       horizontalAlignment: Text.AlignRight
-                      color: root.dim
+                      color: rowItem.rowColor
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.bodySmall
                     }
@@ -452,7 +455,7 @@ Panel {
                       if (isp) parts.push(isp)
                       return parts.join("  ·  ")
                     }
-                    color: root.dim
+                    color: rowItem.rowColor
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.bodySmall
                     opacity: 0.85
