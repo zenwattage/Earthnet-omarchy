@@ -304,8 +304,18 @@ Panel {
               right: parent.right; top: parent.top; bottom: parent.bottom
             }
             spacing: Style.space(7)
+            // Never let a row spill past the card: clip to the legend box and
+            // only show as many rows as actually fit (the previous formula
+            // ignored the header + spacing, so the last row or two overran).
+            clip: true
+
+            readonly property int rowHeight: Style.space(30)
+            readonly property int maxRows: Math.max(0, Math.floor(
+              (height - legendHeader.implicitHeight - spacing)
+              / (rowHeight + spacing)))
 
             Text {
+              id: legendHeader
               text: "ACTIVE CONNECTIONS"
               color: root.dim
               font.family: root.fontFamily
@@ -327,8 +337,8 @@ Panel {
                 readonly property bool isSelected:
                   root.selectedId !== "" && String(modelData.id || "") === root.selectedId
                 width: legend.width
-                height: Math.max(Style.space(30), rowInner.implicitHeight + Style.space(6))
-                visible: index < Math.max(0, Math.floor((body.height - Style.space(20)) / height))
+                height: Math.max(legend.rowHeight, rowInner.implicitHeight + Style.space(6))
+                visible: index < legend.maxRows
 
                 // Hover / selected background.
                 Rectangle {
