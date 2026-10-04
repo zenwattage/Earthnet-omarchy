@@ -57,6 +57,9 @@ Item {
   property bool showGraticule: true
   property bool showTraces: true
   property bool showStars: true
+  // Opacity multiplier for the ocean disk that sits over the starfield. Lower
+  // values let more stars show through behind the globe; 1.0 is the original.
+  property real diskAlpha: 0.6
   property bool showHome: true
   property bool compact: false       // bar mode: no graticule, bolder rim
   property bool showBorders: true     // faint political (country) borders
@@ -178,7 +181,8 @@ Item {
       var x = (Math.sin(i * 12.9898 + w * 0.5) * 43758.5453) % 1
       var y = (Math.sin(i * 78.233 + h * 0.5) * 43758.5453) % 1
       x = Math.abs(x); y = Math.abs(y)
-      out.push([x * w, y * h, 0.25 + (i % 7) / 10])
+      // Per-star brightness; scaled 20% brighter (capped at full).
+      out.push([x * w, y * h, Math.min(1.0, (0.25 + (i % 7) / 10) * 1.2)])
     }
     stars = out
   }
@@ -321,7 +325,7 @@ Item {
 
     // Starfield behind everything.
     if (root.showStars) {
-      ctx.fillStyle = rgba(root.starColor, 0.9)
+      ctx.fillStyle = rgba(root.starColor, 0.99)
       for (var i = 0; i < stars.length; i++) {
         var st = stars[i]
         var tw = 0.55 + 0.45 * Math.sin(root.clock * 1.7 + i)
@@ -341,13 +345,16 @@ Item {
     ctx.fill()
 
     // Translucent ocean disk: gives the wireframe something to sit on and
-    // makes the sphere read as a globe rather than a flat map.
+    // makes the sphere read as a globe rather than a flat map. The disk is
+    // drawn over the starfield, so its opacity is scaled by diskAlpha to let
+    // the stars behind the globe show through.
+    var da = root.diskAlpha
     var sphere = ctx.createRadialGradient(
       cx - R * 0.28, cy - R * 0.32, R * 0.05,
       cx, cy, R)
-    sphere.addColorStop(0, rgba(root.oceanColor, 0.85))
-    sphere.addColorStop(0.65, rgba(root.oceanColor, 0.55))
-    sphere.addColorStop(1, rgba(root.spaceColor, 0.18))
+    sphere.addColorStop(0, rgba(root.oceanColor, 0.85 * da))
+    sphere.addColorStop(0.65, rgba(root.oceanColor, 0.55 * da))
+    sphere.addColorStop(1, rgba(root.spaceColor, 0.18 * da))
     ctx.beginPath()
     ctx.arc(cx, cy, R, 0, Math.PI * 2)
     ctx.fillStyle = sphere
