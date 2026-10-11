@@ -22,10 +22,12 @@ Commands (lines on stdin) let QML nudge the process cheaply:
   ``refresh``          reload theme + land and re-emit ``init``
   ``quit``             exit cleanly
 
-The module reuses the already-installed ``earthnet`` package when it can find
-it (``python3 -m earthnet``), and otherwise falls back to the copies under
-``plugin_dir/pylib/earthnet``. That keeps the sidecar usable both from the
-Earthnet checkout and from a standalone plugin install.
+The terminal app's package lives in its own repo
+(https://github.com/zenwattage/Earthnet). This repo vendors the subset of it the
+sidecar imports under ``pylib/earthnet`` (see ``pylib/README.md``) and puts that
+copy first on ``sys.path``, so a clone here works with no pip install and
+without a sibling checkout. Set ``EARTHNET_PYLIB`` to an Earthnet checkout to
+develop against the terminal app instead.
 """
 from __future__ import annotations
 
@@ -40,8 +42,15 @@ import time
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Make the earthnet package importable, whether we live in the source tree or
-# were copied into ~/.config/omarchy/plugins/<id>/.
+# Make the earthnet package importable, whether we are running from a clone of
+# this repo or from ~/.config/omarchy/plugins/<id>/.
+#
+# ``candidates`` is in priority order: the vendored copy under pylib/ wins, so
+# behaviour stays pinned to the version that shipped with the plugin rather than
+# whatever happens to be installed in site-packages. The remaining entries keep
+# the legacy layouts working (omarchy-plugin/ inside an Earthnet checkout, or a
+# bare earthnet/ copied into the plugin dir), and EARTHNET_PYLIB overrides all
+# of them.
 # ---------------------------------------------------------------------------
 
 _HERE = Path(__file__).resolve().parent
@@ -49,11 +58,15 @@ _HERE = Path(__file__).resolve().parent
 
 def _bootstrap_earthnet():
     candidates = [
-        str(_HERE.parent),          # repo layout: parent holds the earthnet pkg
-        str(_HERE / "pylib"),       # installed plugin layout: vendored copy
-        str(_HERE),                 # earthnet/ copied directly into the plugin
+        str(_HERE / "pylib"),       # vendored copy shipped in this repo (the norm)
+        str(_HERE.parent),          # legacy: omarchy-plugin/ in the Earthnet checkout
+        str(_HERE),                 # legacy: earthnet/ copied into the plugin dir
     ]
-    for c in candidates:
+    override = os.environ.get("EARTHNET_PYLIB", "").strip()
+    if override:
+        candidates.insert(0, override)
+    # Insert in reverse so the list order above is the sys.path priority order.
+    for c in reversed(candidates):
         if c not in sys.path:
             sys.path.insert(0, c)
     try:

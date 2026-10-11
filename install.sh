@@ -2,19 +2,21 @@
 # Install the Earthnet Omarchy shell plugin into ~/.config/omarchy/plugins/.
 #
 # Two modes:
-#   ./install.sh            symlink (default) -- ideal while developing from the
-#                           Earthnet checkout; edits take effect immediately.
-#   ./install.sh --copy     copy the plugin plus the Python modules it needs, so
-#                           the install is self-contained and survives moving or
-#                           deleting the checkout.
+#   ./install.sh            symlink (default) -- ideal while developing from this
+#                           checkout; edits take effect immediately.
+#   ./install.sh --copy     copy the plugin, so the install is self-contained and
+#                           survives moving or deleting this checkout.
 #
-# In both cases the plugin lands as ~/.config/omarchy/plugins/earthnet.globe and
-# the bar widget is enabled, placed after omarchy.workspaces.
+# Either way the plugin lands as ~/.config/omarchy/plugins/earthnet.globe and the
+# bar widget is enabled, placed after omarchy.workspaces.
+#
+# This repo is a standalone checkout: the earthnet modules the Python sidecar
+# imports are vendored in pylib/ (see pylib/README.md), so there is no sibling
+# checkout to reach into and nothing to pip install.
 set -euo pipefail
 
 PLUGIN_ID="earthnet.globe"
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="$(cd "$SRC/.." && pwd)"
 DEST="$HOME/.config/omarchy/plugins/$PLUGIN_ID"
 MODE="${1:-symlink}"
 
@@ -24,15 +26,14 @@ rm -rf "$DEST"
 
 if [[ "$MODE" == "--copy" ]]; then
   mkdir -p "$DEST"
-  # Plugin sources.
-  cp -a "$SRC/." "$DEST/"
-  rm -rf "$DEST/tools" "$DEST/install.sh" "$DEST/.git"
-  # The sidecar imports the earthnet package. Vendor it so there is no
-  # dependency on the checkout or a pip install.
-  mkdir -p "$DEST/pylib"
-  cp -a "$REPO/earthnet" "$DEST/pylib/earthnet"
+  # Everything the shell needs at runtime, and nothing else: the manifest, the
+  # QML sources, the sidecar, its cached geometry and the vendored earthnet
+  # modules. README/demo media/install.sh stay behind.
+  cp -a "$SRC/manifest.json" "$SRC"/*.qml "$SRC/earthnet-omarchy" \
+        "$SRC/assets" "$SRC/pylib" "$DEST/"
+  [[ -f "$SRC/LICENSE" ]] && cp -a "$SRC/LICENSE" "$DEST/"
   rm -rf "$DEST/pylib/earthnet/__pycache__"
-  echo "Copied plugin + vendored earthnet package."
+  echo "Copied plugin + vendored earthnet modules."
 else
   ln -s "$SRC" "$DEST"
   echo "Symlinked $DEST -> $SRC"

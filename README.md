@@ -2,11 +2,14 @@
 
 A live, full-resolution 3D Earth in your [Omarchy](https://omarchy.org/) status
 bar — glowing arcs trace every internet connection to and from your machine.
-This is the GUI sibling of the [terminal Earthnet](../README.md): same data,
-same palette, same idea, but drawn in real pixels by Quickshell instead of
-half-blocks and sixel.
+This is the GUI sibling of the [terminal Earthnet](https://github.com/zenwattage/Earthnet):
+same data, same palette, same idea, but drawn in real pixels by Quickshell
+instead of half-blocks and sixel.
 
 ![Earthnet panel demo](demo.gif)
+
+A longer cut, with the panel legend in motion, is in
+[`media/demo-long.gif`](media/demo-long.gif) ([mp4](media/demo-long.mp4)).
 
 The bar shows a small spinning Earth. Left-click it for the full panel: a large
 animated globe, the Jarvis HUD, and a colour-matched legend of every live
@@ -40,12 +43,11 @@ globe keeps its arcs clipped to the disk so it stays a clean circular icon.
 
 ## Install
 
-From the Earthnet checkout:
-
 ```bash
-cd omarchy-plugin
+git clone https://github.com/zenwattage/Earthnet-omarchy.git
+cd Earthnet-omarchy
 ./install.sh            # symlink (default): edits from the checkout apply live
-./install.sh --copy     # copy plugin + a vendored earthnet package (portable)
+./install.sh --copy     # copy the plugin in, self-contained (portable)
 ```
 
 Either way the plugin lands in `~/.config/omarchy/plugins/earthnet.globe` and is
@@ -55,15 +57,20 @@ enabled in the bar. If it does not appear immediately:
 omarchy restart shell
 ```
 
-It is a plain plugin directory, so you can also install it by hand: drop the
-folder at `~/.config/omarchy/plugins/earthnet.globe`, run
+It is a plain plugin directory, so you can also install it by hand: copy
+`manifest.json`, `*.qml`, `earthnet-omarchy`, `assets/` and `pylib/` into
+`~/.config/omarchy/plugins/earthnet.globe`, run
 `omarchy-shell shell rescanPlugins`, then `omarchy plugin enable earthnet.globe`.
 
 ## Requirements
 
 - Omarchy (Quickshell) with the standard shell.
 - Python 3.8+ (system `python3`). The sidecar is pure standard library — no pip
-  packages, no numpy, no Pillow.
+  packages, no numpy, no Pillow, and no sibling checkout: the `earthnet` modules
+  it needs are vendored in [`pylib/`](pylib/README.md).
+
+`ss` (iproute2) is used for process attribution and byte counters; it ships with
+Omarchy. Whole-network traffic needs root — see *How it works*.
 
 ## Usage
 
@@ -115,12 +122,14 @@ Example:
 
 Drawing and data are deliberately split.
 
-- **`earthnet-omarchy`** (Python) is the data sidecar. It reuses the terminal
-  app's `conntrack`, `geo`, `land` and `theme` modules to capture flows, resolve
-  each remote endpoint with GeoIP, load the coastline geometry, detect your home
-  location and derive a palette from the active Omarchy theme. It streams
-  line-delimited JSON: one `init` object (home, palette, land geometry, render
-  hints) then a `frame` object on every poll with the live traces.
+- **`earthnet-omarchy`** (Python) is the data sidecar. It uses the terminal
+  app's `conntrack`, `geo`, `land` and `theme` modules — vendored under
+  [`pylib/earthnet/`](pylib/README.md), so this repo needs no pip install — to
+  capture flows, resolve each remote endpoint with GeoIP, load the coastline
+  geometry, detect your home location and derive a palette from the active
+  Omarchy theme. It streams line-delimited JSON: one `init` object (home,
+  palette, land geometry, render hints) then a `frame` object on every poll with
+  the live traces.
 
   Coastlines come from Natural Earth **50m** (`ne_50m_land.json`), simplified to
   ~14k points with Ramer–Douglas–Peucker and cached under `assets/`. A second,
@@ -176,13 +185,33 @@ byte counters require `ss`, which ships with iproute2 (present on Omarchy).
 ## Files
 
 ```
-omarchy-plugin/
-  manifest.json         plugin manifest (id, kinds, barWidget schema)
-  BarWidget.qml         the spinning Earth in the bar + panel loader
-  Panel.qml             full panel: globe, HUD, legend, controls
-  Globe.qml             the Canvas renderer
-  PythonSidecar.qml     process bridge / JSON parser
-  earthnet-omarchy      Python data sidecar
-  assets/land.geo.json  cached coastline geometry (regenerated if missing)
-  install.sh            symlink or copy installer
+manifest.json         plugin manifest (id, kinds, barWidget schema)
+BarWidget.qml         the spinning Earth in the bar + panel loader
+Panel.qml             full panel: globe, HUD, legend, controls
+Globe.qml             the Canvas renderer
+PythonSidecar.qml     process bridge / JSON parser
+earthnet-omarchy      Python data sidecar (entry point)
+assets/               cached coastline + border geometry (regenerated if missing)
+pylib/earthnet/       vendored earthnet modules the sidecar imports
+scripts/sync-pylib.sh re-vendor pylib/ from an Earthnet checkout
+install.sh            symlink or copy installer
+media/                longer demo GIF / mp4
 ```
+
+## Vendoring
+
+`pylib/earthnet/` is a verbatim copy of the five pure-stdlib modules the sidecar
+imports from [zenwattage/Earthnet](https://github.com/zenwattage/Earthnet)
+(`conntrack`, `geo`, `globe`, `land`, `theme`). It is what makes a clone of this
+repo self-contained. After an upstream change:
+
+```bash
+scripts/sync-pylib.sh                  # re-copy from ~/Projects/Earthnet
+scripts/sync-pylib.sh --check          # just report drift
+EARTHNET_PYLIB=/path/to/Earthnet earthnet-omarchy   # or run against a checkout
+```
+
+## License
+
+MIT — see [LICENSE](LICENSE). Same license as the
+[terminal app](https://github.com/zenwattage/Earthnet).

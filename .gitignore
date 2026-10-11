@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.pyo
+
+# Runtime land/border caches are regenerated from assets/ if missing.
+assets/*.tmp
