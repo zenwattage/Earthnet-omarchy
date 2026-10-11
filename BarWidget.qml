@@ -59,11 +59,18 @@ BarWidget {
     if ("sidecar" in target) target.sidecar = sidecar
   }
 
-  // ---- shell summon/hide/toggle routing -------------------------------------
+  // ---- panel lifecycle -------------------------------------------------------
+  //
+  // Forwarded to Panel.qml under the names the development guide's bar-widget
+  // contract uses: open() / close() / toggle() / closeForPopoutSwitch(), plus
+  // the opened and popoutSwitchClosing properties. The bar itself calls open()
+  // and close() (summonBarWidget/hideBarWidget) and shell.toggle() picks between
+  // them; togglePanel() is kept as an alias for this widget's own click handler.
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
   function open() { if (panelLoader.item && panelLoader.item.openFromHotkey) panelLoader.item.openFromHotkey() }
   function close() { if (panelLoader.item && panelLoader.item.close) panelLoader.item.close() }
-  function togglePanel() { if (panelLoader.item && panelLoader.item.toggle) panelLoader.item.toggle() }
+  function toggle() { if (panelLoader.item && panelLoader.item.toggle) panelLoader.item.toggle() }
+  function togglePanel() { root.toggle() }
   function refresh() { if (sidecar) sidecar.poll() }
   readonly property bool popoutSwitchClosing: panelLoader.item ? panelLoader.item.popoutSwitchClosing === true : false
   function closeForPopoutSwitch() { if (panelLoader.item) panelLoader.item.closeForPopoutSwitch() }
@@ -130,7 +137,7 @@ BarWidget {
     onPressed: function(mouseButton) {
       if (mouseButton === Qt.RightButton) sidecar.setMode(demoLive ? "live" : "demo")
       else if (mouseButton === Qt.MiddleButton) sidecar.poll()
-      else root.togglePanel()
+      else root.toggle()
     }
   }
 }

@@ -43,12 +43,28 @@ globe keeps its arcs clipped to the disk so it stays a clean circular icon.
 
 ## Install
 
+The normal way — the same path the marketplace uses. It clones the repo into
+your plugin directory, validates the manifest, and places the widget:
+
+```bash
+omarchy plugin add https://github.com/zenwattage/Earthnet-omarchy.git --enable
+```
+
+Update it later with `omarchy plugin update earthnet.globe`, remove it with
+`omarchy plugin remove earthnet.globe`.
+
+Working on the plugin itself, from a checkout:
+
 ```bash
 git clone https://github.com/zenwattage/Earthnet-omarchy.git
 cd Earthnet-omarchy
-./install.sh            # symlink (default): edits from the checkout apply live
-./install.sh --copy     # copy the plugin in, self-contained (portable)
+scripts/check.sh        # validate the manifest + lint the QML (do this first)
+./install.sh            # copy (default): a real plugin directory, no symlinks
+./install.sh --link     # dev shortcut: symlink this checkout in, edits go live
 ```
+
+`--link` is convenient but its plugin folder contains a symlink, which
+`omarchy plugin validate` refuses — use `--copy` for anything you publish.
 
 Either way the plugin lands in `~/.config/omarchy/plugins/earthnet.globe` and is
 enabled in the bar. If it does not appear immediately:
@@ -61,6 +77,26 @@ It is a plain plugin directory, so you can also install it by hand: copy
 `manifest.json`, `*.qml`, `earthnet-omarchy`, `assets/` and `pylib/` into
 `~/.config/omarchy/plugins/earthnet.globe`, run
 `omarchy-shell shell rescanPlugins`, then `omarchy plugin enable earthnet.globe`.
+
+## Validate
+
+The development guide asks for two checks before sharing; [`scripts/check.sh`](scripts/check.sh)
+runs both:
+
+```bash
+omarchy plugin validate .                                   # manifest + layout, same rules the shell enforces
+qmllint -I "$OMARCHY_PATH/shell" BarWidget.qml Panel.qml     # QML against the installed shell imports
+```
+
+Both exit clean here. The runtime routes the guide lists, by hand:
+
+```bash
+omarchy plugin list --json | jq '.[] | select(.id=="earthnet.globe")'
+omarchy-shell shell summon earthnet.globe '{}'   # opens the panel
+omarchy-shell shell hide   earthnet.globe        # closes it
+omarchy-shell shell toggle earthnet.globe        # summon/hide, whichever applies
+omarchy plugin disable earthnet.globe && omarchy plugin enable earthnet.globe
+```
 
 ## Requirements
 
@@ -193,8 +229,9 @@ PythonSidecar.qml     process bridge / JSON parser
 earthnet-omarchy      Python data sidecar (entry point)
 assets/               cached coastline + border geometry (regenerated if missing)
 pylib/earthnet/       vendored earthnet modules the sidecar imports
+scripts/check.sh      validate the manifest + lint the QML (the guide's two checks)
 scripts/sync-pylib.sh re-vendor pylib/ from an Earthnet checkout
-install.sh            symlink or copy installer
+install.sh            copy (default) or symlink installer, validates first
 media/                longer demo GIF / mp4
 ```
 
