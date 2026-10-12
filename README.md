@@ -6,10 +6,7 @@ This is the GUI sibling of the [terminal Earthnet](https://github.com/zenwattage
 same data, same palette, same idea, but drawn in real pixels by Quickshell
 instead of half-blocks and sixel.
 
-![Earthnet panel demo](demo.gif)
-
-A longer cut, with the panel legend in motion, is in
-[`media/demo-long.gif`](media/demo-long.gif) ([mp4](media/demo-long.mp4)).
+![Earthnet panel demo](media/demo-long.gif)
 
 The bar shows a small spinning Earth. Left-click it for the full panel: a large
 animated globe, the Jarvis HUD, and a colour-matched legend of every live
@@ -17,8 +14,8 @@ connection. Each legend row shows the destination, protocol/port, how long
 it's been open, the destination's local time, live throughput, and round-trip
 latency; a second line carries the owning process, the flow direction
 (`↑` you initiated, `↓` remote initiated, `↕` both), and the network operator
-(ISP/org). So a row reads like *"↑ Tokyo  TCP:443  12s  04:21  3.8 MB/s  87ms
-/ firefox · outbound · Amazon.com, Inc."*
+(ISP/org). So a row reads like _"↑ Tokyo TCP:443 12s 04:21 3.8 MB/s 87ms
+/ firefox · outbound · Amazon.com, Inc."_
 
 Click a legend row to open a **connection detail card** for that link: remote
 IP, location and coordinates, network/ISP and ASN, direction, protocol/port and
@@ -29,7 +26,7 @@ outside to dismiss.
 
 In the panel the trace arcs follow a **ballistic flight path** — each lifts off
 its origin, bows clear of the globe, and lands on the destination. The bow is
-applied in *screen space* (perpendicular to the globe, up to
+applied in _screen space_ (perpendicular to the globe, up to
 `0.30 + 0.85 × distance` of the globe radius at the apex), not as a radial lift:
 a radial lift would scale a point's distance from the globe centre, so a route
 whose apex sits near the centre of the disk would not visibly move and the arc
@@ -106,29 +103,29 @@ omarchy plugin disable earthnet.globe && omarchy plugin enable earthnet.globe
   it needs are vendored in [`pylib/`](pylib/README.md).
 
 `ss` (iproute2) is used for process attribution and byte counters; it ships with
-Omarchy. Whole-network traffic needs root — see *How it works*.
+Omarchy. Whole-network traffic needs root — see _How it works_.
 
 ## Usage
 
-| where | action | result |
-|-------|--------|--------|
-| bar globe | left-click | open the full panel |
-| bar globe | right-click | toggle live / demo data |
-| bar globe | middle-click | force a refresh |
-| panel | `esc` | close |
-| panel | `space` | pause / resume the spin |
-| panel | `←/→ h/l` | rotate |
-| panel | `↑/↓ k/j` | tilt |
-| panel | `enter` | refresh (reload theme + land, re-poll) |
-| panel | `t` | toggle trace arcs |
-| panel | `g` | toggle the graticule |
-| panel | `s` | toggle the starfield |
-| panel | `a` | toggle the connection labels |
-| panel | `u` | toggle the HUD |
-| panel | `d` | toggle demo mode |
-| panel | `r` | refresh |
-| panel | `c` | clear traces |
-| panel | `+/-` | zoom |
+| where     | action       | result                                 |
+| --------- | ------------ | -------------------------------------- |
+| bar globe | left-click   | open the full panel                    |
+| bar globe | right-click  | toggle live / demo data                |
+| bar globe | middle-click | force a refresh                        |
+| panel     | `esc`        | close                                  |
+| panel     | `space`      | pause / resume the spin                |
+| panel     | `←/→ h/l`    | rotate                                 |
+| panel     | `↑/↓ k/j`    | tilt                                   |
+| panel     | `enter`      | refresh (reload theme + land, re-poll) |
+| panel     | `t`          | toggle trace arcs                      |
+| panel     | `g`          | toggle the graticule                   |
+| panel     | `s`          | toggle the starfield                   |
+| panel     | `a`          | toggle the connection labels           |
+| panel     | `u`          | toggle the HUD                         |
+| panel     | `d`          | toggle demo mode                       |
+| panel     | `r`          | refresh                                |
+| panel     | `c`          | clear traces                           |
+| panel     | `+/-`        | zoom                                   |
 
 The panel can also be summoned by keybind or script:
 
@@ -142,11 +139,11 @@ omarchy-shell shell summon earthnet.globe '{}'
 Set these on the widget's entry in `~/.config/omarchy/shell.json` (or via
 `omarchy bar set earthnet.globe <key> <value>`):
 
-| key | default | meaning |
-|-----|---------|---------|
-| `spinSpeed` | `0.35` | radians/second of automatic rotation |
-| `demo` | `Off` | `On` renders bundled sample connections instead of live traffic |
-| `mmdb` | `` | path to a GeoLite2-City `.mmdb` for offline GeoIP |
+| key         | default | meaning                                                         |
+| ----------- | ------- | --------------------------------------------------------------- |
+| `spinSpeed` | `0.35`  | radians/second of automatic rotation                            |
+| `demo`      | `Off`   | `On` renders bundled sample connections instead of live traffic |
+| `mmdb`      | ``      | path to a GeoLite2-City `.mmdb` for offline GeoIP               |
 
 Example:
 
@@ -180,13 +177,14 @@ Drawing and data are deliberately split.
   from `ss -p -i`; when the kernel `conntrack` backend is active (root), those
   values are matched back onto its flows by endpoint key, since conntrack itself
   tracks neither.
+
 - **`Globe.qml`** draws. It converts the coastline rings to unit-sphere vectors
   once, then each frame applies the spin/tilt rotation, projects, and paints the
   far hemisphere, the near hemisphere, the graticule, the home marker and the
   animated trace arcs onto a `Canvas`. The coastline is stroked once per
   hemisphere, with faint **country borders** (Natural Earth admin-0 boundary
   lines) drawn over the near-side land in a muted tint so countries read without
-  competing with the coast. (An earlier translucent *fill* looked better on a
+  competing with the coast. (An earlier translucent _fill_ looked better on a
   still frame but glitched against the coastline while the globe spun, so it was
   dropped in favour of outlines only.) A `FrameAnimation` drives it, so it scales
   with the display's device pixel ratio — this is what makes it full resolution
